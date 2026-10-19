@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.liufor02144.erroragent.mapper.InspectLlmUsageMapper">
+
+    <insert id="insert">
+        INSERT INTO ai_inspect_llm_usage
+            (fp_id, scene, model, input_tokens, output_tokens, cost_estimate,
+             elapsed_ms, success, error_msg)
+        VALUES
+            (#{fpId}, #{scene}, #{model}, #{inputTokens}, #{outputTokens}, #{costEstimate},
+             #{elapsedMs}, #{success}, #{errorMsg})
+    </insert>
+
+    <!-- 每日上限熔断依据。失败的调用也计入：失败同样消耗配额与时间 -->
+    <select id="countSince" resultType="int">
+        SELECT COUNT(*)
+        FROM ai_inspect_llm_usage
+        WHERE create_time &gt;= #{since}
+    </select>
+
+    <select id="sumByDay" resultType="java.util.Map">
+        SELECT DATE(create_time)        AS day,
+               COUNT(*)                 AS calls,
+               SUM(input_tokens)        AS inputTokens,
+               SUM(output_tokens)       AS outputTokens,
+               SUM(cost_estimate)       AS cost
+        FROM ai_inspect_llm_usage
+        WHERE create_time &gt;= #{since}
+        GROUP BY DATE(create_time)
+        ORDER BY day DESC
+    </select>
+
+    <select id="failureRate" resultType="java.util.Map">
+        SELECT COUNT(*)                                  AS total,
+               SUM(IF(success = 0, 1, 0))                AS failed
+        FROM ai_inspect_llm_usage
+        WHERE create_time &gt;= #{since}
+    </select>
+
+    <!--
+      巡检记录的一轮 = [本轮开始, 下一轮开始)，按场景 + 模型汇总这一段的调用。
+      带上模型：换模型后要能分清哪几轮是哪个模型跑的，费用和效果才有得比
+    -->
+    <select id="sumBySceneBetween" resultType="java.util.Map">
+        SELECT scene, model,
+               COUNT(*)                          AS calls,
+               SUM(IF(success = 0, 1, 0))        AS failed,
+               COALESCE(SUM(input_tokens), 0)    AS inputTokens,
+               COALESCE(SUM(output_tokens), 0)   AS outputTokens,
+               COALESCE(SUM(cost_estimate), 0)   AS cost
+        FROM ai_inspect_llm_usage
+        WHERE create_time &gt;= #{from}
+          <if test="to != null">AND create_time &lt; #{to}</if>
+        GROUP BY scene, model
+    </select>
+
+    <!-- 单个指纹在某时刻之后的用量，用于把分析的 token 记到那一条明细上 -->
+    <select id="sumByFpSince" resultType="java.util.Map">
+        SELECT COALESCE(SUM(input_tokens), 0)  AS inputTokens,
+               COALESCE(SUM(output_tokens), 0) AS outputTokens
+        FROM ai_inspect_llm_usage
+        WHERE fp_id = #{fpId} AND create_time &gt;= #{since}
+    </select>
+
+    <delete id="deleteBefore">
+        DELETE FROM ai_inspect_llm_usage WHERE create_time &lt; #{before} LIMIT 10000
+    </delete>
+
+</mapper>

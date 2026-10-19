@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.liufor02144.erroragent.mapper.InspectConfigMapper">
+
+    <sql id="allColumns">
+        id, cfg_key, cfg_value, default_value, value_type, group_name, description,
+        operator, create_time, update_time
+    </sql>
+
+    <select id="selectAll" resultType="io.github.liufor02144.erroragent.entity.InspectConfig">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_config
+        ORDER BY group_name, cfg_key
+    </select>
+
+    <select id="selectByKey" resultType="io.github.liufor02144.erroragent.entity.InspectConfig">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_config
+        WHERE cfg_key = #{cfgKey}
+    </select>
+
+    <update id="updateValue">
+        UPDATE ai_inspect_config
+        SET cfg_value = #{cfgValue}, operator = #{operator}
+        WHERE cfg_key = #{cfgKey}
+    </update>
+
+</mapper>

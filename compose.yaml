@@ -1,0 +1,70 @@
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-erroragent}
+      MYSQL_USER: ${MYSQL_USER:-erroragent}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  erroragent:
+    build:
+      context: .
+    image: erroragent:local
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      TZ: Asia/Shanghai
+      ERRORAGENT_DB_URL: "jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-erroragent}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true"
+      ERRORAGENT_DB_USERNAME: ${MYSQL_USER:-erroragent}
+      ERRORAGENT_DB_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      ERRORAGENT_ADMIN_USERNAME: ${ERRORAGENT_ADMIN_USERNAME:-admin}
+      ERRORAGENT_ADMIN_PASSWORD: ${ERRORAGENT_ADMIN_PASSWORD:?set ERRORAGENT_ADMIN_PASSWORD in .env}
+      ERRORAGENT_BASE_URL: ${ERRORAGENT_BASE_URL:-http://localhost:8080}
+      ERRORAGENT_ENABLED: ${ERRORAGENT_ENABLED:-false}
+      ERRORAGENT_APP_PACKAGES: ${ERRORAGENT_APP_PACKAGES:-}
+      ERRORAGENT_STRIP_PREFIXES: ${ERRORAGENT_STRIP_PREFIXES:-}
+      SLS_ENDPOINT: ${SLS_ENDPOINT:-}
+      SLS_PROJECT: ${SLS_PROJECT:-}
+      SLS_LOGSTORE: ${SLS_LOGSTORE:-}
+      SLS_ACCESS_KEY_ID: ${SLS_ACCESS_KEY_ID:-}
+      SLS_ACCESS_KEY_SECRET: ${SLS_ACCESS_KEY_SECRET:-}
+      SLS_CONTAINER_PREFIX: ${SLS_CONTAINER_PREFIX:-}
+      SLS_EXTRA_APP_IDS: ${SLS_EXTRA_APP_IDS:-}
+      LLM_ENABLED: ${LLM_ENABLED:-false}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_REDACT: ${LLM_REDACT:-true}
+      PUSH_ENABLED: ${PUSH_ENABLED:-false}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_CHAT_ID: ${FEISHU_CHAT_ID:-}
+      GIT_BASE_URL: ${GIT_BASE_URL:-}
+      GIT_USERNAME: ${GIT_USERNAME:-oauth2}
+      GIT_TOKEN: ${GIT_TOKEN:-}
+      GIT_LOCAL_PATH: ${GIT_LOCAL_PATH:-/app/data/repos}
+    volumes:
+      - git-repos:/app/data/repos
+
+volumes:
+  mysql-data:
+  git-repos:

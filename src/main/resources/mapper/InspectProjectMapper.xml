@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.liufor02144.erroragent.mapper.InspectProjectMapper">
+
+    <sql id="allColumns">
+        id, repo_path, repo_name, app_ids, branch, local_path,
+        last_sync_time, last_sync_error, enabled, create_time, update_time, deleted
+    </sql>
+
+    <select id="selectEnabled" resultType="io.github.liufor02144.erroragent.entity.InspectProject">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_project
+        WHERE deleted = 0 AND enabled = 1
+        ORDER BY id
+    </select>
+
+    <select id="selectAll" resultType="io.github.liufor02144.erroragent.entity.InspectProject">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_project
+        WHERE deleted = 0
+        ORDER BY id
+    </select>
+
+    <select id="selectById" resultType="io.github.liufor02144.erroragent.entity.InspectProject">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_project
+        WHERE id = #{id}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_inspect_project (repo_path, repo_name, app_ids, branch, enabled)
+        VALUES (#{repoPath}, #{repoName}, #{appIds}, #{branch}, 1)
+    </insert>
+
+    <update id="update">
+        UPDATE ai_inspect_project
+        <set>
+            <if test="appIds != null">app_ids = #{appIds},</if>
+            <if test="branch != null">branch = #{branch},</if>
+            <if test="enabled != null">enabled = #{enabled},</if>
+        </set>
+        WHERE id = #{id}
+    </update>
+
+    <update id="deleteById">
+        UPDATE ai_inspect_project SET deleted = 1 WHERE id = #{id}
+    </update>
+
+    <update id="markSyncSuccess">
+        UPDATE ai_inspect_project
+        SET last_sync_time = #{syncTime}, local_path = #{localPath}, last_sync_error = NULL
+        WHERE id = #{id}
+    </update>
+
+    <!--
+        失败时刻意不更新 last_sync_time。
+        监控靠「last_sync_time 超过 26 小时」发现代码过期，
+        若失败也刷新时间戳，就会出现「同步一直失败但监控显示正常」的盲区。
+    -->
+    <update id="markSyncError">
+        UPDATE ai_inspect_project
+        SET last_sync_error = #{error}
+        WHERE id = #{id}
+    </update>
+
+</mapper>

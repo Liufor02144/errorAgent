@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.liufor02144.erroragent.mapper.InspectRunItemMapper">
+
+    <insert id="insert">
+        INSERT INTO ai_inspect_run_item
+            (run_id, stage, result, event_id, fp_id, title, severity, detail,
+             input_tokens, output_tokens, message_id, card_json)
+        VALUES
+            (#{runId}, #{stage}, #{result}, #{eventId}, #{fpId}, #{title}, #{severity}, #{detail},
+             COALESCE(#{inputTokens}, 0), COALESCE(#{outputTokens}, 0), #{messageId}, #{cardJson})
+    </insert>
+
+    <!-- 卡片原文单独取：一张十几 KB，列表里全带上既慢又用不上 -->
+    <select id="selectByRunId" resultType="io.github.liufor02144.erroragent.entity.InspectRunItem">
+        SELECT id, run_id, stage, result, event_id, fp_id, title, severity, detail,
+               input_tokens, output_tokens, message_id,
+               IF(card_json IS NULL, NULL, '1') AS card_json,
+               create_time
+        FROM ai_inspect_run_item
+        WHERE run_id = #{runId}
+        ORDER BY id
+    </select>
+
+    <select id="selectCardJson" resultType="java.lang.String">
+        SELECT card_json FROM ai_inspect_run_item WHERE id = #{id}
+    </select>
+
+    <select id="countSkip" resultType="int">
+        SELECT COUNT(*) FROM ai_inspect_run_item
+        WHERE run_id = #{runId} AND stage = 'PUSH' AND result = 'SKIP' AND event_id = #{eventId}
+    </select>
+
+    <delete id="deleteBefore">
+        DELETE FROM ai_inspect_run_item WHERE create_time &lt; #{before} LIMIT 20000
+    </delete>
+
+</mapper>

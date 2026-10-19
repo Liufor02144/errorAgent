@@ -1,0 +1,28 @@
+# Maven / Java
+target/
+*.class
+*.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# Frontend
+node_modules/
+web/node/
+web/dist/
+src/main/resources/static/
+
+# OS
+.DS_Store
+
+# 本地配置与数据（可能含密钥）
+.env
+.env.*
+!.env.example
+application-local.yml
+data/

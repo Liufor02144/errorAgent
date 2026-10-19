@@ -1,0 +1,307 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.liufor02144.erroragent.mapper.InspectFingerprintMapper">
+
+    <sql id="allColumns">
+        id, fp_hash, fp_key, app_id, has_stack, exc_simple, logger_class, biz_frame, msg_tpl,
+        exc_cause, first_seen_time, last_seen_time, total_count, status, judge_state, category, severity,
+        handled, pushed_time, push_count, last_message_id, create_time, update_time, deleted
+    </sql>
+
+    <select id="selectByHashes" resultType="io.github.liufor02144.erroragent.entity.InspectFingerprint">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_fingerprint
+        WHERE deleted = 0
+          AND fp_hash IN
+        <foreach collection="hashes" item="h" open="(" close=")" separator=",">
+            #{h}
+        </foreach>
+    </select>
+
+    <select id="selectAnyId" resultType="java.lang.Long">
+        SELECT id FROM ai_inspect_fingerprint LIMIT 1
+    </select>
+
+    <select id="selectByHash" resultType="io.github.liufor02144.erroragent.entity.InspectFingerprint">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_fingerprint
+        WHERE deleted = 0 AND fp_hash = #{fpHash}
+        LIMIT 1
+    </select>
+
+    <select id="selectById" resultType="io.github.liufor02144.erroragent.entity.InspectFingerprint">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_fingerprint
+        WHERE id = #{id}
+    </select>
+
+    <!--
+        批量插入或累加。
+
+        关键：ON DUPLICATE KEY UPDATE 中刻意排除以下字段，否则会破坏已有状态 ——
+          first_seen_time  排除后已存在指纹保留原首现时间（「是否首次出现」的判定依据）
+          total_count      排除后不会重复累加 —— 采集窗口是重叠的（每 5 分钟查 1~2 小时），
+                           累加会让计数虚高数倍。真实累计由 syncTotalCount 从 stat 表汇总回填
+          status           排除后不会把人工设置的 SUPPRESSED 覆盖回 ACTIVE（抑制会失效）
+          category/severity 排除后不会冲掉 AI 分析结论
+          handled          排除后不会把已处理的重置为未处理
+          pushed_time/push_count 排除后不会丢失推送记录
+    -->
+    <insert id="batchUpsert">
+        INSERT INTO ai_inspect_fingerprint
+            (fp_hash, fp_key, app_id, has_stack, exc_simple, logger_class, biz_frame, msg_tpl,
+             exc_cause, first_seen_time, last_seen_time, total_count, status, judge_state)
+        VALUES
+        <foreach collection="list" item="i" separator=",">
+            (#{i.fpHash}, #{i.fpKey}, #{i.appId}, #{i.hasStack}, #{i.excSimple}, #{i.loggerClass},
+             #{i.bizFrame}, #{i.msgTpl}, #{i.excCause}, #{i.firstSeenTime}, #{i.lastSeenTime}, #{i.totalCount},
+             #{i.status}, #{i.judgeState})
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+            last_seen_time = GREATEST(last_seen_time, VALUES(last_seen_time)),
+            judge_state    = VALUES(judge_state),
+            msg_tpl        = VALUES(msg_tpl),
+            exc_cause      = VALUES(exc_cause)
+    </insert>
+
+    <!--
+        从 stat 表汇总回填真实累计次数。
+        stat 表是覆盖语义（唯一键 fp_id+stat_hour），因此 SUM 始终等于真实累计，
+        不受采集窗口重叠影响。每轮只回填本轮涉及的指纹。
+    -->
+    <update id="syncTotalCount">
+        UPDATE ai_inspect_fingerprint f
+        JOIN (
+            SELECT fp_id, SUM(cnt) AS total
+            FROM ai_inspect_stat
+            WHERE fp_id IN
+            <foreach collection="ids" item="id" open="(" close=")" separator=",">
+                #{id}
+            </foreach>
+            GROUP BY fp_id
+        ) t ON f.id = t.fp_id
+        SET f.total_count = t.total
+    </update>
+
+    <update id="updateJudgeState">
+        UPDATE ai_inspect_fingerprint
+        SET judge_state = #{judgeState}
+        WHERE id = #{id}
+    </update>
+
+    <!--
+        批量修正判定状态。用 CASE WHEN 合成单条 UPDATE，
+        避免 foreach 生成多条语句（需开启 allowMultiQueries，有注入面）。
+    -->
+    <select id="selectByTemplateId" resultType="io.github.liufor02144.erroragent.entity.InspectFingerprint">
+        SELECT id, fp_hash, fp_key, app_id, has_stack, exc_simple, logger_class,
+               biz_frame, msg_tpl, exc_cause, template_id,
+               first_seen_time, last_seen_time, total_count, status, judge_state,
+               severity, handled, create_time, update_time, deleted
+        FROM ai_inspect_fingerprint
+        WHERE deleted = 0 AND template_id = #{templateId}
+        ORDER BY total_count DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectWithoutTemplate" resultType="io.github.liufor02144.erroragent.entity.InspectFingerprint">
+        SELECT id, fp_hash, fp_key, app_id, has_stack, exc_simple, logger_class,
+               biz_frame, msg_tpl, exc_cause, template_id,
+               first_seen_time, last_seen_time, total_count, status, judge_state,
+               category, severity, handled, create_time, update_time, deleted
+        FROM ai_inspect_fingerprint
+        WHERE deleted = 0 AND template_id IS NULL
+        ORDER BY total_count DESC
+        LIMIT #{limit}
+    </select>
+
+    <update id="batchUpdateTemplateId">
+        UPDATE ai_inspect_fingerprint
+        SET template_id = CASE id
+        <foreach collection="items" item="it">
+            WHEN #{it.id} THEN #{it.templateId}
+        </foreach>
+        END
+        WHERE id IN
+        <foreach collection="items" item="it" open="(" close=")" separator=",">
+            #{it.id}
+        </foreach>
+    </update>
+
+    <update id="batchUpdateJudgeState">
+        UPDATE ai_inspect_fingerprint
+        SET judge_state = CASE id
+        <foreach collection="items" item="it">
+            WHEN #{it.id} THEN #{it.judgeState}
+        </foreach>
+        ELSE judge_state END
+        WHERE id IN
+        <foreach collection="items" item="it" open="(" close=")" separator=",">
+            #{it.id}
+        </foreach>
+    </update>
+
+    <update id="batchUpdateStatus">
+        UPDATE ai_inspect_fingerprint
+        SET status = #{status}
+        WHERE status &lt;&gt; #{status}
+          AND id IN
+        <foreach collection="ids" item="id" open="(" close=")" separator=",">
+            #{id}
+        </foreach>
+    </update>
+
+    <update id="updateAnalysis">
+        UPDATE ai_inspect_fingerprint
+        SET category = #{category}, severity = #{severity}
+        WHERE id = #{id}
+    </update>
+
+    <update id="updateStatus">
+        UPDATE ai_inspect_fingerprint
+        SET status = #{status}
+        WHERE id = #{id}
+    </update>
+
+    <update id="markHandled">
+        UPDATE ai_inspect_fingerprint
+        SET handled = 1
+        WHERE id = #{id}
+    </update>
+
+    <select id="selectPendingPush" resultType="io.github.liufor02144.erroragent.entity.InspectFingerprint">
+        SELECT f.id, f.fp_hash, f.fp_key, f.app_id, f.has_stack, f.exc_simple, f.logger_class,
+               f.biz_frame, f.msg_tpl, f.exc_cause, f.first_seen_time, f.last_seen_time, f.total_count,
+               f.status, f.judge_state, f.category, f.severity, f.handled,
+               f.pushed_time, f.push_count, f.last_message_id, f.create_time, f.update_time, f.deleted
+        FROM ai_inspect_fingerprint f
+        WHERE f.deleted = 0
+          AND f.status = 'ACTIVE'
+          AND f.handled = 0
+          AND f.category IS NOT NULL
+          AND f.category &lt;&gt; 'BIZ_EXPECTED'
+          AND f.judge_state IN ('NEW', 'SURGE', 'RESURGENT')
+          AND (f.pushed_time IS NULL OR f.pushed_time &lt; #{dedupBefore})
+        ORDER BY
+            FIELD(f.severity, 'P0', 'P1', 'P2', 'P3'),
+            f.last_seen_time DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="countNewSince" resultType="long">
+        SELECT COUNT(*)
+        FROM ai_inspect_fingerprint
+        WHERE deleted = 0 AND first_seen_time &gt;= #{since}
+    </select>
+
+    <select id="selectAppOptions" resultType="java.util.HashMap">
+        SELECT app_id AS appId, COUNT(*) AS cnt
+        FROM ai_inspect_fingerprint
+        WHERE deleted = 0
+        GROUP BY app_id
+        ORDER BY cnt DESC
+    </select>
+
+    <select id="countPushedSince" resultType="long">
+        SELECT COUNT(*)
+        FROM ai_inspect_fingerprint
+        WHERE deleted = 0 AND pushed_time &gt;= #{since}
+    </select>
+
+    <update id="markPushed">
+        UPDATE ai_inspect_fingerprint
+        SET pushed_time = #{pushedTime}, push_count = push_count + 1,
+            last_message_id = #{messageId}
+        WHERE id = #{id}
+    </update>
+
+    <sql id="conditionWhere">
+        <where>
+            deleted = 0
+            <if test="appId != null and appId != ''">
+                AND app_id = #{appId}
+            </if>
+            <if test="status != null and status != ''">
+                AND status = #{status}
+            </if>
+            <if test="judgeStates != null and judgeStates.size() > 0">
+                AND judge_state IN
+                <foreach collection="judgeStates" item="s" open="(" close=")" separator=",">
+                    #{s}
+                </foreach>
+            </if>
+            <if test="category != null and category != ''">
+                AND category = #{category}
+            </if>
+            <if test="handled != null">
+                AND handled = #{handled}
+            </if>
+            <if test="pushedOnly != null and pushedOnly">
+                AND pushed_time IS NOT NULL
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND (biz_frame LIKE CONCAT('%', #{keyword}, '%')
+                     OR msg_tpl LIKE CONCAT('%', #{keyword}, '%')
+                     OR logger_class LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+            <if test="startTime != null">
+                AND last_seen_time &gt;= #{startTime}
+            </if>
+            <if test="endTime != null">
+                AND last_seen_time &lt;= #{endTime}
+            </if>
+        </where>
+    </sql>
+
+    <!--
+        待分析候选。LEFT JOIN 排除近期已分析过的，避免与幂等窗口重复判断。
+        按量级倒序：额度有限时优先分析影响面大的。
+    -->
+    <select id="selectPendingAnalysis" resultType="io.github.liufor02144.erroragent.entity.InspectFingerprint">
+        SELECT f.id, f.fp_hash, f.fp_key, f.app_id, f.has_stack, f.exc_simple, f.logger_class,
+               f.biz_frame, f.msg_tpl, f.exc_cause, f.first_seen_time, f.last_seen_time, f.total_count,
+               f.status, f.judge_state, f.category, f.severity, f.handled,
+               f.pushed_time, f.push_count, f.last_message_id, f.create_time, f.update_time, f.deleted
+        FROM ai_inspect_fingerprint f
+        LEFT JOIN ai_inspect_analysis a
+               ON a.fp_id = f.id AND a.create_time &gt;= #{since}
+        WHERE f.deleted = 0
+          AND f.status = 'ACTIVE'
+          AND f.judge_state IN ('NEW', 'SURGE', 'RESURGENT')
+          AND a.id IS NULL
+        ORDER BY f.total_count DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectByCondition" resultType="io.github.liufor02144.erroragent.entity.InspectFingerprint">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_fingerprint
+        <include refid="conditionWhere"/>
+        <!--
+            默认按严重度排：这个页面是为「第一时间发现新问题」做的，
+            按累计次数排会把量大但早已知晓的老异常顶在最前面。
+            未分析的（severity 为 NULL）排在已分析之后、但不沉底，避免漏看。
+        -->
+        <choose>
+            <when test="orderBy == 'recent'">
+                ORDER BY last_seen_time DESC
+            </when>
+            <when test="orderBy == 'count'">
+                ORDER BY total_count DESC, last_seen_time DESC
+            </when>
+            <otherwise>
+                ORDER BY FIELD(severity, 'P0', 'P1', 'P2', 'P3') ASC,
+                         severity IS NULL ASC,
+                         last_seen_time DESC
+            </otherwise>
+        </choose>
+        LIMIT #{offset}, #{limit}
+    </select>
+
+    <select id="countByCondition" resultType="long">
+        SELECT COUNT(*)
+        FROM ai_inspect_fingerprint
+        <include refid="conditionWhere"/>
+    </select>
+
+</mapper>

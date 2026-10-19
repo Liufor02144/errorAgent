@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.liufor02144.erroragent.mapper.InspectStatMapper">
+
+    <!--
+        唯一键 (fp_id, stat_hour) 冲突时【覆盖】而非累加。
+        采集窗口有 5 分钟重叠（10 分钟间隔取 15 分钟窗口防漏），
+        同一小时会被多轮采集命中，累加会导致计数虚高。
+    -->
+    <insert id="batchUpsert">
+        INSERT INTO ai_inspect_stat (fp_id, stat_hour, cnt, batch_id)
+        VALUES
+        <foreach collection="list" item="i" separator=",">
+            (#{i.fpId}, #{i.statHour}, #{i.cnt}, #{i.batchId})
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+            cnt      = VALUES(cnt),
+            batch_id = VALUES(batch_id)
+    </insert>
+
+    <delete id="deleteByBatchId">
+        DELETE FROM ai_inspect_stat WHERE batch_id = #{batchId}
+    </delete>
+
+    <!--
+        基线：近 N 天内、同一小时刻度的平均次数。
+        例如当前 14 点，则取近 7 天每天 14 点的均值 —— 按小时对齐是为了避开业务的日内波峰波谷，
+        否则凌晨的低谷会把白天的正常量算成「突增」。
+
+        excludeFrom 必须排除【当前小时】：当前小时正是待判定的对象，
+        把它算进基线等于自己和自己比，突增会被自身稀释掉而判不出来。
+    -->
+    <!--
+        突增基线＝「过去 N 天里，同一个钟点这一小时的平均量」。
+
+        分桶改成 5 分钟之后，一小时有 12 行，不能再直接 AVG(cnt) ——
+        那样算出来的是「每 5 分钟的平均量」，基线会缩到 1/12，
+        任何正常波动都会被判成突增。必须先按小时汇总，再对小时求平均。
+
+        历史遗留的整小时行也能正确参与：它在自己那个小时里就是一行，
+        汇总后仍是该小时的总量，与 5 分钟行不会同时存在（一个小时只会被一种粒度覆盖）。
+    -->
+    <select id="avgBaseline" resultType="io.github.liufor02144.erroragent.dto.BaselineStat">
+        SELECT AVG(hourCnt) AS avgCnt, COUNT(*) AS samples
+        FROM (
+            SELECT DATE_FORMAT(stat_hour, '%Y-%m-%d %H') AS h, SUM(cnt) AS hourCnt
+            FROM ai_inspect_stat
+            WHERE fp_id = #{fpId}
+              AND HOUR(stat_hour) = #{hourOfDay}
+              AND stat_hour &gt;= #{sinceTime}
+              AND stat_hour &lt; #{excludeFrom}
+            GROUP BY h
+        ) t
+    </select>
+
+    <select id="selectTrend" resultType="java.util.Map">
+        SELECT stat_hour AS statHour, cnt AS cnt
+        FROM ai_inspect_stat
+        WHERE fp_id = #{fpId}
+          AND stat_hour &gt;= #{startTime}
+          AND stat_hour &lt;= #{endTime}
+        ORDER BY stat_hour ASC
+    </select>
+
+    <select id="sumTotalByFpIds" resultType="long">
+        SELECT COALESCE(SUM(cnt), 0)
+        FROM ai_inspect_stat
+        WHERE stat_hour &gt;= #{startTime}
+          AND stat_hour &lt;= #{endTime}
+          AND fp_id IN
+        <foreach collection="fpIds" item="id" open="(" close=")" separator=",">
+            #{id}
+        </foreach>
+    </select>
+
+    <select id="sumCountByFpIds" resultType="java.util.Map">
+        SELECT fp_id AS fpId, SUM(cnt) AS cnt
+        FROM ai_inspect_stat
+        WHERE stat_hour &gt;= #{startTime}
+          AND stat_hour &lt;= #{endTime}
+          AND fp_id IN
+        <foreach collection="fpIds" item="id" open="(" close=")" separator=",">
+            #{id}
+        </foreach>
+        GROUP BY fp_id
+    </select>
+
+    <select id="sumCount" resultType="java.lang.Long">
+        SELECT IFNULL(SUM(cnt), 0)
+        FROM ai_inspect_stat
+        WHERE fp_id = #{fpId}
+          AND stat_hour &gt;= #{startTime}
+          AND stat_hour &lt;= #{endTime}
+    </select>
+
+    <delete id="deleteBefore">
+        DELETE FROM ai_inspect_stat WHERE stat_hour &lt; #{before} LIMIT 10000
+    </delete>
+
+</mapper>

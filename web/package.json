@@ -1,0 +1,21 @@
+{
+  "name": "erroragent-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "build:maven": "vite build --outDir ../target/classes/static --emptyOutDir"
+  },
+  "dependencies": {
+    "axios": "1.20.0",
+    "echarts": "6.1.0",
+    "element-ui": "2.15.14",
+    "json-bigint": "1.0.0",
+    "vue": "2.7.16"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue2": "2.3.3",
+    "vite": "6.4.1"
+  }
+}

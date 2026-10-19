@@ -1,0 +1,53 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: erroragent
+  datasource:
+    url: ${ERRORAGENT_DB_URL:jdbc:mysql://localhost:3306/erroragent?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+    username: ${ERRORAGENT_DB_USERNAME:erroragent}
+    password: ${ERRORAGENT_DB_PASSWORD:}
+  task:
+    scheduling:
+      pool:
+        size: 4
+
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+
+erroragent:
+  enabled: ${ERRORAGENT_ENABLED:false}
+  admin:
+    username: ${ERRORAGENT_ADMIN_USERNAME:admin}
+    password: ${ERRORAGENT_ADMIN_PASSWORD:}
+  naming:
+    app-packages: ${ERRORAGENT_APP_PACKAGES:}
+    strip-prefixes: ${ERRORAGENT_STRIP_PREFIXES:}
+  sls:
+    endpoint: ${SLS_ENDPOINT:}
+    project: ${SLS_PROJECT:}
+    logstore: ${SLS_LOGSTORE:}
+    access-key-id: ${SLS_ACCESS_KEY_ID:}
+    access-key-secret: ${SLS_ACCESS_KEY_SECRET:}
+    container-prefix: ${SLS_CONTAINER_PREFIX:}
+    extra-app-ids: ${SLS_EXTRA_APP_IDS:}
+  llm:
+    enabled: ${LLM_ENABLED:false}
+    base-url: ${LLM_BASE_URL:}
+    api-key: ${LLM_API_KEY:}
+    model: ${LLM_MODEL:}
+    redact: ${LLM_REDACT:true}
+  push:
+    enabled: ${PUSH_ENABLED:false}
+    app-id: ${FEISHU_APP_ID:}
+    app-secret: ${FEISHU_APP_SECRET:}
+    chat-id: ${FEISHU_CHAT_ID:}
+    detail-base-url: ${ERRORAGENT_BASE_URL:http://localhost:8080}
+  git:
+    base-url: ${GIT_BASE_URL:}
+    username: ${GIT_USERNAME:oauth2}
+    token: ${GIT_TOKEN:}
+    local-path: ${GIT_LOCAL_PATH:./data/repos}

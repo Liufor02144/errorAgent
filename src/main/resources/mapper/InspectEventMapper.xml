@@ -1,0 +1,394 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.liufor02144.erroragent.mapper.InspectEventMapper">
+
+    <sql id="allColumns">
+        id, event_type, scope, fp_id, fp_hash, headline, app_id, app_count, app_list,
+        fp_count, exc_simple, exc_cause, severity, first_seen_time, last_seen_time,
+        template_id, frame_list, total_count, trigger_reason, last_analyze_time,
+        analyzed_total, analyzed_app_count,
+        handled, handle_note, handler, handle_time, push_count, last_push_time,
+        last_message_id, create_time, update_time, deleted
+    </sql>
+
+    <select id="selectOpenByFpId" resultType="io.github.liufor02144.erroragent.entity.InspectEvent">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_event
+        WHERE deleted = 0 AND handled = 0 AND fp_id = #{fpId}
+        ORDER BY id DESC LIMIT 1
+    </select>
+
+    <!--
+        指纹 → 事件的反查，给卡片深链用。
+        两步：先按 fp_id，再按该指纹的模版 —— 事件按模版聚合，
+        代表指纹未必是当前这个，只按 fp_id 找会漏。
+    -->
+    <select id="selectLatestByFpId" resultType="io.github.liufor02144.erroragent.entity.InspectEvent">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_event
+        WHERE deleted = 0
+          AND (
+                fp_id = #{fpId}
+             OR (template_id IS NOT NULL
+                 AND template_id = (SELECT template_id FROM ai_inspect_fingerprint
+                                    WHERE id = #{fpId} AND deleted = 0))
+          )
+        ORDER BY handled ASC, last_seen_time DESC
+        LIMIT 1
+    </select>
+
+    <select id="selectOpenByTemplateId" resultType="io.github.liufor02144.erroragent.entity.InspectEvent">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_event
+        WHERE deleted = 0 AND handled = 0 AND template_id = #{templateId}
+          AND scope &lt;&gt; 'LOCATION'
+        ORDER BY id DESC LIMIT 1
+    </select>
+
+    <!-- 按代码位置成事件的：模版 + 服务 + 代码位置 三者都对上才是同一件事 -->
+    <select id="selectOpenByLocation" resultType="io.github.liufor02144.erroragent.entity.InspectEvent">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_event
+        WHERE deleted = 0 AND handled = #{handled} AND scope = 'LOCATION'
+          AND template_id = #{templateId} AND app_id = #{appId} AND frame_list = #{frame}
+        ORDER BY IF(#{handled} = 1, handle_time, NULL) DESC, id DESC LIMIT 1
+    </select>
+
+    <select id="selectLastHandled" resultType="io.github.liufor02144.erroragent.entity.InspectEvent">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_event
+        WHERE deleted = 0 AND handled = 1
+        <choose>
+            <when test="templateId != null">AND template_id = #{templateId}</when>
+            <otherwise>AND fp_id = #{fpId}</otherwise>
+        </choose>
+        ORDER BY handle_time DESC, id DESC LIMIT 1
+    </select>
+
+    <select id="selectById" resultType="io.github.liufor02144.erroragent.entity.InspectEvent">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_event WHERE id = #{id}
+    </select>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_inspect_event
+            (event_type, scope, template_id, fp_id, fp_hash, headline, app_id, app_count,
+             app_list, frame_list, fp_count, exc_simple, exc_cause, severity,
+             first_seen_time, last_seen_time, total_count, trigger_reason)
+        VALUES (#{eventType}, #{scope}, #{templateId}, #{fpId}, #{fpHash}, #{headline},
+                #{appId}, #{appCount}, #{appList}, #{frameList}, #{fpCount},
+                #{excSimple}, #{excCause}, #{severity}, #{firstSeenTime},
+                #{lastSeenTime}, #{totalCount}, #{triggerReason})
+    </insert>
+
+    <!--
+      事件仍在发生。first_seen_time 刻意不动：事件的价值就在于「已经持续多久」。
+      total_count 用 SET 而非 += —— 见 InspectEventMapper#accumulate 的说明
+    -->
+    <update id="accumulate">
+        UPDATE ai_inspect_event
+        SET total_count    = #{totalCount},
+            last_seen_time = #{lastSeenTime}
+            <if test="severity != null and severity != ''">
+                , severity = #{severity}
+            </if>
+            <if test="triggerReason != null and triggerReason != ''">
+                , trigger_reason = #{triggerReason}
+            </if>
+            <!-- 服务与位置会随时间扩散：同一个模版今天多了一个服务在抛，要能看出来 -->
+            <if test="appCount != null and appCount > 0">
+                , app_count = GREATEST(app_count, #{appCount})
+            </if>
+            <if test="appList != null and appList != ''">
+                , app_list = #{appList}
+            </if>
+            <if test="frameList != null and frameList != ''">
+                , frame_list = #{frameList}
+            </if>
+        WHERE id = #{id}
+    </update>
+
+    <update id="markHandled">
+        UPDATE ai_inspect_event
+        SET handled = 1, handle_note = #{note}, handler = #{handler}, handle_time = NOW()
+        WHERE id = #{id}
+    </update>
+
+    <!--
+      已合并进同一批请求的另一张卡片：推送次数和时间照常推进，让它跟主事件保持同一个重推节奏；
+      不记 last_message_id —— 那张卡片属于主事件，标注这个事件时不能去改它
+    -->
+    <update id="markMerged">
+        UPDATE ai_inspect_event
+        SET push_count = push_count + 1,
+            last_push_time = #{pushTime}
+        WHERE id = #{id}
+    </update>
+
+    <!-- 最近推过、仍未处理、且还在发生的事件：同一批请求合并时拿来比对 -->
+    <select id="selectRecentlyPushedOpen" resultType="io.github.liufor02144.erroragent.entity.InspectEvent">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_event e
+        WHERE e.deleted = 0 AND e.handled = 0 AND e.push_count &gt; 0
+          AND e.last_message_id IS NOT NULL
+          AND e.last_seen_time &gt;= #{since}
+        ORDER BY e.last_push_time DESC
+        LIMIT 20
+    </select>
+
+    <update id="markPushed">
+        UPDATE ai_inspect_event
+        SET push_count = push_count + 1,
+            last_push_time = #{pushTime},
+            last_message_id = #{messageId}
+        WHERE id = #{id}
+    </update>
+
+    <!--
+      只筛「未处理 + 达量级 + 严重度匹配」。
+      重推间隔随 push_count 递增，档位换算在 Java 侧做 —— 间隔列表是可配置的，
+      写进 SQL 就得拼 CASE WHEN，改一次配置要改两处。
+    -->
+    <select id="selectPushable" resultType="io.github.liufor02144.erroragent.entity.InspectEvent">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_event
+        WHERE deleted = 0 AND handled = 0
+        <!--
+            这里【刻意保留】未定级的候选，不在 SQL 里筛掉：
+            指纹侧不产出 severity，只有 AI 分析会给，所以新事件在分析完成前
+            severity 一定是空的。在这里筛掉会让它们永远进不了候选集，
+            分析完成后也没人再捞它们。
+
+            真正的门槛在 Java 侧的 severityGate：它会先从分析结论取定级并回写，
+            取不到就跳过本轮（下一轮分析好了再推）。
+
+            ⚠️ 原来这句写的是 severity IS NULL OR severity IN (...)，
+            空定级被当成「放行」—— 实测 36 条待处理事件全部未定级且 34 条已推出去，
+            等于 push.severity.include 这道门槛从来没生效过。
+        -->
+        ORDER BY last_seen_time DESC
+        LIMIT 200
+    </select>
+
+    <!--
+      优先分析还没分析过的（last_analyze_time 为空排在前），
+      同等条件下量级大的先分析 —— 额度用完时，先花在影响面大的事情上
+    -->
+    <!--
+        待分析的事件。三道限制：
+          · handled = 0        已处理的不用再分析
+          · last_analyze_time  同一事件每 N 小时最多送一次模型（默认 1 小时）
+          · 模版非业务预期      ← 直接查模版状态，不依赖「事件已被关闭」这个间接前提
+
+        最后一条是必要的：模版被标为业务预期时，虽然四个入口都会联动关闭事件、
+        每轮采集还有兜底清扫，但只要有一处漏了或还没轮到，这条事件就会继续
+        每小时送一次模型 —— 而它已经被确认为「本来就该发生」，分析它毫无意义，纯属烧 token。
+    -->
+    <select id="selectPendingAnalysis" resultType="io.github.liufor02144.erroragent.entity.InspectEvent">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_event e
+        WHERE e.deleted = 0 AND e.handled = 0 AND e.fp_id IS NOT NULL
+          AND (e.last_analyze_time IS NULL
+               OR (e.last_analyze_time &lt; #{before}
+                   <!--
+                     间隔到了也不一定要再分析：只有实质变化才值得再问一次模型。
+                     analyzed_total 为空 = 还没分析成功过（失败的按间隔重试，否则永远拿不到定级）
+                   -->
+                   AND (e.analyzed_total IS NULL
+                        OR e.total_count &gt;= e.analyzed_total * #{growth}
+                        OR e.app_count &gt; COALESCE(e.analyzed_app_count, 0))))
+          <!-- 突增判定关闭后，之前开着的突增事件也不再送分析 -->
+          <if test="!surgeEnabled">
+            AND e.event_type &lt;&gt; 'SURGE'
+          </if>
+          <!-- 模版已标业务预期的不送分析 —— 突增除外，突增正是要分析的 -->
+          AND (e.event_type = 'SURGE' OR NOT EXISTS (
+                SELECT 1 FROM ai_inspect_library l
+                WHERE l.id = e.template_id
+                  AND l.deleted = 0
+                  AND l.business_expected = 1
+          ))
+        ORDER BY e.last_analyze_time IS NOT NULL, e.total_count DESC
+        LIMIT #{limit}
+    </select>
+
+    <update id="markAnalyzed">
+        UPDATE ai_inspect_event SET last_analyze_time = #{analyzeTime} WHERE id = #{id}
+    </update>
+
+    <!-- 分析成功后记下当时的量级与服务数，作为「有没有实质变化」的比较基准 -->
+    <update id="markAnalyzedSnapshot">
+        UPDATE ai_inspect_event
+        SET analyzed_total = #{total}, analyzed_app_count = #{appCount}
+        WHERE id = #{id}
+    </update>
+
+    <sql id="listWhere">
+        WHERE deleted = 0
+        <if test="handled != null">
+            AND handled = #{handled}
+        </if>
+        <if test="eventType != null and eventType != ''">
+            AND event_type = #{eventType}
+        </if>
+        <if test="appId != null and appId != ''">
+            AND app_id = #{appId}
+        </if>
+        <if test="severity != null and severity != ''">
+            AND severity = #{severity}
+        </if>
+        <if test="since != null">
+            AND first_seen_time &gt;= #{since}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND (headline LIKE CONCAT('%', #{keyword}, '%')
+                 OR exc_simple LIKE CONCAT('%', #{keyword}, '%')
+                 OR exc_cause LIKE CONCAT('%', #{keyword}, '%')
+                 OR app_id LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+    </sql>
+
+    <!--
+      未处理的排前面，其余按最近发生时间倒序。
+      联表带出模版文本：列表上要能看出这条事件归属哪个模版，
+      否则「为什么这几个服务的异常被合成一条」在页面上无从解释
+    -->
+    <select id="selectList" resultType="io.github.liufor02144.erroragent.entity.InspectEvent">
+        SELECT e.id, e.event_type, e.scope, e.fp_id, e.fp_hash, e.template_id,
+               e.headline, e.app_id, e.app_count, e.app_list, e.frame_list,
+               e.fp_count, e.exc_simple, e.exc_cause, e.severity,
+               e.first_seen_time, e.last_seen_time, e.total_count, e.trigger_reason,
+               e.last_analyze_time, e.handled, e.handle_note, e.handler, e.handle_time,
+               e.push_count, e.last_push_time, e.last_message_id,
+               e.create_time, e.update_time, e.deleted,
+               l.template AS templateText,
+               l.business_expected AS templateExpected
+        FROM ai_inspect_event e
+        LEFT JOIN ai_inspect_library l ON l.id = e.template_id AND l.deleted = 0
+        <include refid="listWhereAliased"/>
+        <!--
+          未处理优先，其次按量级降序。
+          刻意不用「最近发生」排序：首次上线时存量债务里有大量偶发长尾
+          （实测 363 个事件中 327 个不足 20 次），按时间排会把它们和
+          几万次的大问题混在一起，人只能一页页翻
+        -->
+        ORDER BY e.handled ASC, e.total_count DESC, e.last_seen_time DESC
+        LIMIT #{offset}, #{limit}
+    </select>
+
+    <!-- 与 listWhere 同义，字段带 e. 前缀供联表查询使用 -->
+    <sql id="listWhereAliased">
+        WHERE e.deleted = 0
+        <if test="handled != null">
+            AND e.handled = #{handled}
+        </if>
+        <if test="eventType != null and eventType != ''">
+            AND e.event_type = #{eventType}
+        </if>
+        <if test="appId != null and appId != ''">
+            AND e.app_id = #{appId}
+        </if>
+        <if test="severity != null and severity != ''">
+            AND e.severity = #{severity}
+        </if>
+        <if test="since != null">
+            AND e.first_seen_time &gt;= #{since}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND (e.headline LIKE CONCAT('%', #{keyword}, '%')
+                 OR e.exc_simple LIKE CONCAT('%', #{keyword}, '%')
+                 OR e.exc_cause LIKE CONCAT('%', #{keyword}, '%')
+                 OR e.app_id LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+    </sql>
+
+    <select id="countList" resultType="int">
+        SELECT COUNT(*) FROM ai_inspect_event
+        <include refid="listWhere"/>
+    </select>
+
+    <select id="summary" resultType="java.util.LinkedHashMap">
+        SELECT
+            COUNT(*)                                                      AS totalEvents,
+            SUM(CASE WHEN handled = 0 THEN 1 ELSE 0 END)                  AS openEvents,
+            SUM(CASE WHEN first_seen_time &gt;= #{todayStart} THEN 1 ELSE 0 END) AS todayEvents,
+            SUM(CASE WHEN first_seen_time &gt;= #{todayStart} AND handled = 0 THEN 1 ELSE 0 END) AS todayOpenEvents
+        FROM ai_inspect_event
+        WHERE deleted = 0
+    </select>
+
+    <select id="selectDistinctApps" resultType="string">
+        SELECT DISTINCT app_id FROM ai_inspect_event
+        WHERE deleted = 0 AND app_id IS NOT NULL AND app_id != ''
+        ORDER BY app_id
+    </select>
+
+    <!--
+        关闭两类错位事件：
+        ① template_id 为空 —— 模版库建立前产生的，现在指纹已有模版归属
+        ② template_id 指向已删除的模版 —— 兜底模版的生成规则改过之后，
+           旧模版被清掉，事件还指着它，页面上会和新模版的事件重复出现
+    -->
+    <update id="closeStaleWithoutTemplate">
+        UPDATE ai_inspect_event e
+        LEFT JOIN ai_inspect_library l ON l.id = e.template_id
+        LEFT JOIN ai_inspect_fingerprint f ON f.id = e.fp_id
+        SET e.handled     = 1,
+            e.handle_note = '模版归属已变更，已按当前模版重新聚合',
+            e.handler     = 'system',
+            e.handle_time = NOW()
+        WHERE e.deleted = 0 AND e.handled = 0
+          AND (
+                (e.template_id IS NULL AND f.template_id IS NOT NULL)
+             OR (e.template_id IS NOT NULL AND (l.id IS NULL OR l.deleted = 1))
+          )
+    </update>
+
+    <update id="updateSeverity">
+        UPDATE ai_inspect_event
+        SET severity = #{severity}
+        WHERE id = #{id} AND deleted = 0
+    </update>
+
+    <update id="closeByTemplateId">
+        UPDATE ai_inspect_event
+        SET handled     = 1,
+            handle_note = #{note},
+            handler     = #{handler},
+            handle_time = NOW()
+        WHERE deleted = 0 AND handled = 0 AND template_id = #{templateId}
+          <!-- 突增事件不关：它的前提就是模版已标业务预期，标记与它不矛盾 -->
+          AND event_type &lt;&gt; 'SURGE'
+    </update>
+
+    <!--
+        自相矛盾状态的兜底清扫：模版说「这本来就该发生」，事件却还挂在待处理里。
+        标记入口有模版页 / 事件页 / AI 复核 / 批量归零四处，靠每处都记得调用是不可靠的。
+
+        只清「新增」事件，不碰「突增」：突增的前提恰恰是模版已标业务预期，
+        二者并不矛盾。实测之前不加这个条件，突增事件创建 1 秒内就被清掉，
+        从没被分析、推送过，待处理列表里也一条都看不到
+    -->
+    <update id="closeByExpectedTemplate">
+        UPDATE ai_inspect_event e
+        JOIN ai_inspect_library l
+          ON l.id = e.template_id AND l.deleted = 0 AND l.business_expected = 1
+        SET e.handled     = 1,
+            e.handle_note = CONCAT('所属模版已确认为业务预期：', LEFT(COALESCE(l.reason, ''), 200)),
+            e.handler     = 'system',
+            e.handle_time = NOW()
+        WHERE e.deleted = 0 AND e.handled = 0 AND e.event_type &lt;&gt; 'SURGE'
+    </update>
+
+    <update id="autoCloseQuiet">
+        UPDATE ai_inspect_event
+        SET handled     = 1,
+            handle_note = CONCAT('系统自动收敛：连续静默至 ',
+                                 DATE_FORMAT(#{quietBefore}, '%Y-%m-%d %H:%i'),
+                                 ' 未再出现'),
+            handler     = 'system',
+            handle_time = NOW()
+        WHERE deleted = 0 AND handled = 0 AND last_seen_time &lt; #{quietBefore}
+    </update>
+
+</mapper>

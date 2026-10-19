@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.liufor02144.erroragent.mapper.InspectRunMapper">
+
+    <sql id="cols">
+        r.id, r.batch_id, r.status, r.trigger_type, r.window_text, r.total_logs, r.sls_rows,
+        r.fingerprints, r.new_count, r.surge_count, r.quiet_count, r.template_count,
+        r.matched_count, r.unmatched_count, r.template_extracted, r.event_count,
+        r.elapsed_ms, r.message, r.start_time, r.end_time, r.create_time
+    </sql>
+
+    <sql id="aggCols">
+        (SELECT COUNT(*) FROM ai_inspect_run_item i
+          WHERE i.run_id = r.id AND i.stage = 'ANALYZE')                    AS analyze_count,
+        (SELECT COUNT(*) FROM ai_inspect_run_item i
+          WHERE i.run_id = r.id AND i.stage = 'ANALYZE' AND i.result = 'FAIL') AS analyze_failed,
+        (SELECT COUNT(*) FROM ai_inspect_run_item i
+          WHERE i.run_id = r.id AND i.stage = 'PUSH' AND i.result = 'SENT')  AS push_sent,
+        (SELECT COUNT(*) FROM ai_inspect_run_item i
+          WHERE i.run_id = r.id AND i.stage = 'PUSH' AND i.result = 'SKIP')  AS push_skipped,
+        (SELECT COUNT(*) FROM ai_inspect_run_item i
+          WHERE i.run_id = r.id AND i.stage = 'EVENT' AND i.result = 'NEW')  AS event_new,
+        (SELECT COUNT(*) FROM ai_inspect_run_item i
+          WHERE i.run_id = r.id AND i.stage = 'EVENT' AND i.result = 'ACCUMULATE') AS event_accumulated
+    </sql>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_inspect_run (batch_id, status, trigger_type, window_text, start_time)
+        VALUES (#{batchId}, #{status}, #{triggerType}, #{windowText}, #{startTime})
+    </insert>
+
+    <update id="updateFinish">
+        UPDATE ai_inspect_run
+        SET status             = #{status},
+            window_text        = #{windowText},
+            total_logs         = #{totalLogs},
+            sls_rows           = #{slsRows},
+            fingerprints       = #{fingerprints},
+            new_count          = #{newCount},
+            surge_count        = #{surgeCount},
+            quiet_count        = #{quietCount},
+            template_count     = #{templateCount},
+            matched_count      = #{matchedCount},
+            unmatched_count    = #{unmatchedCount},
+            template_extracted = #{templateExtracted},
+            event_count        = #{eventCount},
+            elapsed_ms         = #{elapsedMs},
+            message            = #{message},
+            end_time           = #{endTime}
+        WHERE id = #{id}
+    </update>
+
+    <!--
+      进程被杀（发版强杀、OOM、pod 驱逐）时 finally 跑不到，那一轮会永远停在 RUNNING。
+      阈值与采集锁的僵死判定一致：锁都判定持有者已死了，记录也该收口
+    -->
+    <update id="closeStaleRunning">
+        UPDATE ai_inspect_run
+        SET status = 'FAILED',
+            message = '进程重启或异常退出，本轮采集未完成',
+            end_time = NOW()
+        WHERE status = 'RUNNING' AND start_time &lt; #{before}
+    </update>
+
+    <select id="selectLatestId" resultType="java.lang.Long">
+        SELECT id FROM ai_inspect_run ORDER BY id DESC LIMIT 1
+    </select>
+
+    <!-- 主键有序即开始时间有序，取紧邻的下一条即可，不必 MIN 扫描 -->
+    <select id="selectNextStart" resultType="java.util.Date">
+        SELECT start_time FROM ai_inspect_run WHERE id &gt; #{id} ORDER BY id LIMIT 1
+    </select>
+
+    <select id="selectById" resultType="io.github.liufor02144.erroragent.entity.InspectRun">
+        SELECT <include refid="cols"/>, <include refid="aggCols"/>
+        FROM ai_inspect_run r
+        WHERE r.id = #{id}
+    </select>
+
+    <select id="selectPage" resultType="io.github.liufor02144.erroragent.entity.InspectRun">
+        SELECT <include refid="cols"/>, <include refid="aggCols"/>
+        FROM (
+            SELECT * FROM ai_inspect_run
+            <where>
+                <if test="status != null and status != ''">status = #{status}</if>
+            </where>
+            ORDER BY id DESC
+            LIMIT #{offset}, #{size}
+        ) r
+        ORDER BY r.id DESC
+    </select>
+
+    <select id="count" resultType="int">
+        SELECT COUNT(*) FROM ai_inspect_run
+        <where>
+            <if test="status != null and status != ''">status = #{status}</if>
+        </where>
+    </select>
+
+    <delete id="deleteBefore">
+        DELETE FROM ai_inspect_run WHERE start_time &lt; #{before} LIMIT 5000
+    </delete>
+
+</mapper>

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.liufor02144.erroragent.mapper.InspectSampleMapper">
+
+    <sql id="allColumns">
+        id, fp_id, raw_message, trace_id, pod_name, image_tag, log_time, create_time
+    </sql>
+
+    <insert id="batchInsert">
+        INSERT INTO ai_inspect_sample (fp_id, raw_message, trace_id, pod_name, image_tag, log_time)
+        VALUES
+        <foreach collection="list" item="i" separator=",">
+            (#{i.fpId}, #{i.rawMessage}, #{i.traceId}, #{i.podName}, #{i.imageTag}, #{i.logTime})
+        </foreach>
+    </insert>
+
+    <select id="selectLatestByFpId" resultType="io.github.liufor02144.erroragent.entity.InspectSample">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_sample
+        WHERE fp_id = #{fpId}
+        ORDER BY log_time DESC
+        LIMIT 1
+    </select>
+
+    <select id="selectByFpId" resultType="io.github.liufor02144.erroragent.entity.InspectSample">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_sample
+        WHERE fp_id = #{fpId}
+        ORDER BY log_time DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="countByFpId" resultType="int">
+        SELECT COUNT(*) FROM ai_inspect_sample WHERE fp_id = #{fpId}
+    </select>
+
+    <delete id="deleteBefore">
+        DELETE FROM ai_inspect_sample WHERE create_time &lt; #{before} LIMIT 10000
+    </delete>
+
+</mapper>

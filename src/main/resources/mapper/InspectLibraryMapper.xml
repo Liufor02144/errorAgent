@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="io.github.liufor02144.erroragent.mapper.InspectLibraryMapper">
+
+    <sql id="allColumns">
+        id, match_type, match_value, template, pattern, business_expected, sample_message,
+        headline, reason, operator, hit_count, last_hit_time, first_seen_time,
+        enabled, create_time, update_time, deleted
+    </sql>
+
+    <select id="selectEnabled" resultType="io.github.liufor02144.erroragent.entity.InspectLibrary">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_library
+        WHERE deleted = 0 AND enabled = 1
+    </select>
+
+    <select id="selectById" resultType="io.github.liufor02144.erroragent.entity.InspectLibrary">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_library WHERE id = #{id}
+    </select>
+
+    <!-- 未确认的排前面：它们每次出现都会报，是最该先看的 -->
+    <select id="selectList" resultType="io.github.liufor02144.erroragent.entity.InspectLibrary">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_library
+        WHERE deleted = 0
+        <if test="businessExpected != null">
+            AND business_expected = #{businessExpected}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND (template LIKE CONCAT('%', #{keyword}, '%')
+                 OR headline LIKE CONCAT('%', #{keyword}, '%')
+                 OR match_value LIKE CONCAT('%', #{keyword}, '%')
+                 OR reason LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY business_expected ASC, hit_count DESC, id DESC
+    </select>
+
+    <!--
+        页面列表：分页，且不带 sample_message。
+        样例是整段原始报错加堆栈，420 条全量返回时一次 500KB，其中样例占四成，
+        而列表根本不显示它 —— 点开详情时由详情接口单独取
+    -->
+    <sql id="listFilter">
+        WHERE deleted = 0
+        <if test="businessExpected != null">
+            AND business_expected = #{businessExpected}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND (template LIKE CONCAT('%', #{keyword}, '%')
+                 OR headline LIKE CONCAT('%', #{keyword}, '%')
+                 OR match_value LIKE CONCAT('%', #{keyword}, '%')
+                 OR reason LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+    </sql>
+
+    <select id="selectPage" resultType="io.github.liufor02144.erroragent.entity.InspectLibrary">
+        SELECT id, match_type, match_value, template, business_expected,
+               headline, reason, operator, hit_count, last_hit_time, first_seen_time,
+               enabled, create_time, update_time
+        FROM ai_inspect_library
+        <include refid="listFilter"/>
+        ORDER BY business_expected ASC, hit_count DESC, id DESC
+        LIMIT #{offset}, #{size}
+    </select>
+
+    <select id="countList" resultType="int">
+        SELECT COUNT(*) FROM ai_inspect_library
+        <include refid="listFilter"/>
+    </select>
+
+    <!--
+        待复核 = 系统故障 + 没被复核过。
+        复核过的 reason 会被改写成「AI 复核：…」或「技术故障，不可标为业务预期…」，
+        以此区分，避免每轮把同一批重复送给模型。
+    -->
+    <select id="selectPendingReview" resultType="io.github.liufor02144.erroragent.entity.InspectLibrary">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_library
+        WHERE deleted = 0
+          AND enabled = 1
+          AND business_expected = 0
+          AND (reason IS NULL
+               OR (reason NOT LIKE 'AI 复核%' AND reason NOT LIKE '技术故障，不可标%'))
+        ORDER BY hit_count DESC, id ASC
+        LIMIT #{limit}
+    </select>
+
+    <select id="countAll" resultType="int">
+        SELECT COUNT(*) FROM ai_inspect_library WHERE deleted = 0 AND enabled = 1
+    </select>
+
+    <select id="countBusinessExpected" resultType="int">
+        SELECT COUNT(*) FROM ai_inspect_library
+        WHERE deleted = 0 AND enabled = 1 AND business_expected = 1
+    </select>
+
+    <select id="countUnconfirmed" resultType="int">
+        SELECT COUNT(*) FROM ai_inspect_library
+        WHERE deleted = 0 AND enabled = 1 AND business_expected = 0
+    </select>
+
+    <select id="selectByValue" resultType="io.github.liufor02144.erroragent.entity.InspectLibrary">
+        SELECT <include refid="allColumns"/>
+        FROM ai_inspect_library
+        WHERE deleted = 0 AND match_type = #{matchType} AND match_value = #{matchValue}
+        LIMIT 1
+    </select>
+
+    <!-- 重复加入不报错：唯一键冲突时静默忽略，返回 0 -->
+    <insert id="insertIgnore" useGeneratedKeys="true" keyProperty="id">
+        INSERT IGNORE INTO ai_inspect_library
+            (match_type, match_value, template, pattern, business_expected, sample_message,
+             headline, reason, operator, first_seen_time, enabled)
+        VALUES (#{matchType}, #{matchValue}, #{template}, #{pattern},
+                #{businessExpected}, #{sampleMessage}, #{headline}, #{reason},
+                #{operator}, #{firstSeenTime}, 1)
+    </insert>
+
+    <insert id="batchInsertIgnore">
+        INSERT IGNORE INTO ai_inspect_library
+            (match_type, match_value, template, pattern, business_expected, sample_message,
+             headline, reason, operator, first_seen_time, enabled)
+        VALUES
+        <foreach collection="list" item="it" separator=",">
+            (#{it.matchType}, #{it.matchValue}, #{it.template}, #{it.pattern},
+             #{it.businessExpected}, #{it.sampleMessage}, #{it.headline}, #{it.reason},
+             #{it.operator}, #{it.firstSeenTime}, 1)
+        </foreach>
+    </insert>
+
+    <update id="updateReason">
+        UPDATE ai_inspect_library
+        SET reason = #{reason}, operator = #{operator}
+        WHERE id = #{id}
+    </update>
+
+    <update id="updateBusinessExpected">
+        UPDATE ai_inspect_library
+        SET business_expected = #{businessExpected},
+            operator = #{operator}
+            <if test="reason != null and reason != ''">
+                , reason = #{reason}
+            </if>
+        WHERE id = #{id}
+    </update>
+
+    <update id="updatePattern">
+        UPDATE ai_inspect_library
+        SET template = #{template}, headline = #{template}, pattern = #{pattern}, operator = #{operator}
+        WHERE id = #{id}
+    </update>
+
+    <update id="updateEnabled">
+        UPDATE ai_inspect_library SET enabled = #{enabled} WHERE id = #{id}
+    </update>
+
+    <update id="deleteById">
+        UPDATE ai_inspect_library SET deleted = 1 WHERE id = #{id}
+    </update>
+
+    <update id="incrHit">
+        UPDATE ai_inspect_library
+        SET hit_count = hit_count + #{delta}, last_hit_time = #{hitTime}
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" close=")" separator=",">
+            #{id}
+        </foreach>
+    </update>
+
+</mapper>
